@@ -224,6 +224,7 @@ Status prc_copy(Process *prc, Process **result);
 #define QUEUE_DELETE prc_delete
 #define QUEUE_DISPLAY prc_display
 #define QUEUE_COMPARATOR prc_compare
+#define QUEUE_COPY prc_copy
 
 #endif
 
@@ -253,7 +254,7 @@ Status qua_erase(QueueArray **qua);
 bool qua_is_empty(QueueArray *qua);
 bool qua_is_full(QueueArray *qua);
 
-//Status qua_copy(QueueArray *qua, QueueArray **result);
+Status qua_copy(QueueArray *qua, QueueArray **result);
 
 Status qua_realloc(QueueArray *qua);
 
@@ -1326,6 +1327,22 @@ Status prc_copy(Process *prc, Process **result)
 	return DS_OK;
 }
 
+// Specific use to prc
+size_t prc_translate_type(String *str)
+{
+	if (str == NULL)
+		return 3;
+
+	if (str_equals_str(str, "SO"))
+		return 0;
+	else if (str_equals_str(str, "UI"))
+		return 1;
+	else if (str_equals_str(str, "UNI"))
+		return 2;
+	else
+		return 3;
+}
+
 /* ---------------------------------------------------------------------------------------------------- Process.c */
 
 /* ---------------------------------------------------------------------------------------------------- QueueArray.c */
@@ -1509,7 +1526,36 @@ bool qua_is_full(QueueArray *qua)
 	return qua->length == qua->capacity;
 }
 
-//Status qua_copy(QueueArray *qua, QueueArray **result)
+Status qua_copy(QueueArray *qua, QueueArray **result)
+{
+	if (qua == NULL)
+		return DS_ERR_NULL_POINTER;
+
+	Status st = qua_init(result);
+
+	if (st != DS_OK)
+		return st;
+
+	QUEUE_T copy;
+
+	size_t i;
+	for (i = 0; i < qua->length; i++)
+	{
+		st = QUEUE_COPY(qua->buffer[i], &copy);
+
+		if (st != DS_OK)
+			return st;
+
+		st = qua_enqueue(*result, copy);
+
+		if (st != DS_OK)
+			return st;
+
+		copy = NULL;
+	}
+
+	return DS_OK;
+}
 
 Status qua_realloc(QueueArray *qua)
 {
@@ -2554,7 +2600,7 @@ Status file_save(DynamicArray *content)
  *
  * ---------------------------------------------------------------------------------------------------- */
 
-Status alg_round_robin(QueueArray *pqueue)
+Status alg_round_robin(QueueArray *pqueue, QueueArray **result)
 {
 	if (pqueue == NULL)
 		return DS_ERR_NULL_POINTER;
@@ -2658,23 +2704,12 @@ Status alg_round_robin(QueueArray *pqueue)
 			break;
 	}
 
-	printf("\nResults\n");
-
-	qua_display(finished);
-
-	printf("\nFinished in %lu iterations", iterations);
-
-	ENTER;
-
-	st = qua_delete(&finished);
-
-	if (st != DS_OK)
-		return st;
+	*result = finished;
 
 	return DS_OK;
 }
 
-Status alg_pri_static(QueueArray *pqueue)
+Status alg_pri_static(QueueArray *pqueue, QueueArray **result)
 {
 	if (pqueue == NULL)
 		return DS_ERR_NULL_POINTER;
@@ -2794,28 +2829,12 @@ Status alg_pri_static(QueueArray *pqueue)
 			break;
 	}
 
-	printf("\nResults\n");
-
-	qua_display(finished);
-
-	printf("\nFinished in %lu iterations", iterations);
-
-	st = prq_delete_queue(&pri_queue);
-
-	ENTER;
-
-	if (st != DS_OK)
-		return st;
-
-	st = qua_delete(&finished);
-
-	if (st != DS_OK)
-		return st;
+	*result = finished;
 
 	return DS_OK;
 }
 
-Status alg_pri_dynamic(QueueArray *pqueue)
+Status alg_pri_dynamic(QueueArray *pqueue, QueueArray **result)
 {
 	if (pqueue == NULL)
 		return DS_ERR_NULL_POINTER;
@@ -2944,29 +2963,132 @@ Status alg_pri_dynamic(QueueArray *pqueue)
 			break;
 	}
 
-	printf("\nResults\n");
-
-	qua_display(finished);
-
-	printf("\nFinished in %lu iterations", iterations);
-
-	st = prq_delete_queue(&pri_queue);
-
-	ENTER;
-
-	if (st != DS_OK)
-		return st;
-
-	st = qua_delete(&finished);
-
-	if (st != DS_OK)
-		return st;
+	*result = finished;
 
 	return DS_OK;
 }
 
-Status alg_pri_type(QueueArray *pqueue)
+Status alg_pri_type(QueueArray *pqueue, QueueArray **result)
 {
+	if (pqueue == NULL)
+		return DS_ERR_NULL_POINTER;
+
+	if (qua_is_empty(pqueue))
+		return DS_ERR_INVALID_ARGUMENT;
+
+	PriorityQueue *pri_queue;
+	QueueArray *finished;
+
+	Status st = prq_init_queue(&pri_queue);
+
+	if (st != DS_OK)
+		return st;
+
+	st = qua_init(&finished);
+
+	if (st != DS_OK)
+		return st;
+
+	Process *current = NULL;
+	Process *blocked = NULL;
+
+	size_t i, len = pqueue->length;
+	for (i = 0; i < len; i++)
+	{
+		st = qua_dequeue(pqueue, &current);
+
+		if (st != DS_OK)
+			return st;
+
+		st = prq_enqueue(pri_queue, current, prc_translate_type(current->type));
+
+		if (st != DS_OK)
+			return st;
+	}
+
+	size_t iterations = 0;
+
+	while (1)
+	{
+		CLEAR_SCREEN;
+
+		if (pri_queue->length == 0 && blocked != NULL)
+		{
+			st = prq_enqueue(pri_queue, blocked, prc_translate_type(blocked->type));
+
+			if (st != DS_OK)
+				return st;
+
+			blocked = NULL;
+		}
+
+		st = prq_dequeue(pri_queue, &current);
+
+		if (st != DS_OK)
+			return st;
+
+		if (current->cpu > 0)
+			(current->cpu)--;
+
+		if (current->io > 0)
+		{
+			if (blocked == NULL)
+			{
+				(current->io)--;
+
+				blocked = current;
+			}
+			else
+			{
+				st = prq_enqueue(pri_queue, blocked, prc_translate_type(blocked->type));
+
+				if (st != DS_OK)
+					return st;
+
+				(current->io)--;
+
+				blocked = current;
+			}
+		}
+		else
+		{
+			if (current->cpu > 0)
+			{
+				st = prq_enqueue(pri_queue, current, prc_translate_type(current->type));
+
+				if (st != DS_OK)
+					return st;
+			}
+			else
+			{
+				st = qua_enqueue(finished, current);
+
+				if (st != DS_OK)
+					return st;
+			}
+		}
+
+		current = NULL;
+
+		prq_display(pri_queue);
+
+		printf("\nCurrently blocked:\n");
+
+		if (blocked != NULL)
+			prc_display(blocked);
+		else
+			printf("None\n");
+
+		SLEEP_F;
+		//getch();
+
+		iterations++;
+
+		if (pri_queue->length == 0 && blocked == NULL)
+			break;
+	}
+
+	*result = finished;
 
 	return DS_OK;
 }
@@ -3415,7 +3537,7 @@ Status process_scheduling(DynamicArray *ptable)
 		}
 		else if (choice >= 1 && choice <= 5)
 		{
-			QueueArray *queue;
+			QueueArray *queue, *result;
 
 			st = dar_copy(ptable, &queue);
 
@@ -3429,7 +3551,7 @@ Status process_scheduling(DynamicArray *ptable)
 
 			if (choice == 1)
 			{
-				st = alg_round_robin(queue);
+				st = alg_round_robin(queue, &result);
 
 				if (st != DS_OK)
 				{
@@ -3440,7 +3562,7 @@ Status process_scheduling(DynamicArray *ptable)
 			}
 			else if (choice == 2)
 			{
-				st = alg_pri_static(queue);
+				st = alg_pri_static(queue, &result);
 
 				if (st != DS_OK)
 				{
@@ -3451,7 +3573,7 @@ Status process_scheduling(DynamicArray *ptable)
 			}
 			else if (choice == 3)
 			{
-				st = alg_pri_dynamic(queue);
+				st = alg_pri_dynamic(queue, &result);
 
 				if (st != DS_OK)
 				{
@@ -3462,7 +3584,7 @@ Status process_scheduling(DynamicArray *ptable)
 			}
 			else if (choice == 4)
 			{
-				st = alg_pri_type(queue);
+				st = alg_pri_type(queue, &result);
 
 				if (st != DS_OK)
 				{
@@ -3473,8 +3595,93 @@ Status process_scheduling(DynamicArray *ptable)
 			}
 			else if (choice == 5)
 			{
-				// TODO
-				// All algorithms
+				QueueArray *round_robin, *static_pri, *dynamic_pri, *type_pri;
+
+				QueueArray *queue1, *queue2, *queue3, *queue4;
+
+				st += qua_copy(queue, &queue1);
+				st += qua_copy(queue, &queue2);
+				st += qua_copy(queue, &queue3);
+				st += qua_copy(queue, &queue4);
+
+				if (st != DS_OK)
+					return st;
+
+				st = alg_round_robin(queue1, &round_robin);
+
+				if (st != DS_OK)
+				{
+					print_status_repr(st);
+
+					ENTER;
+				}
+
+				st = alg_pri_static(queue2, &static_pri);
+
+				if (st != DS_OK)
+				{
+					print_status_repr(st);
+
+					ENTER;
+				}
+
+				st = alg_pri_dynamic(queue3, &dynamic_pri);
+
+				if (st != DS_OK)
+				{
+					print_status_repr(st);
+
+					ENTER;
+				}
+
+				st = alg_pri_type(queue4, &type_pri);
+
+				if (st != DS_OK)
+				{
+					print_status_repr(st);
+
+					ENTER;
+				}
+
+				CLEAR_SCREEN;
+
+				printf("\n|%s|%s|%s|%s|", " Round Robin ", " Static Priority ", " Dynamic Priority ", " Priority by type ");
+				printf("\n|%s|%s|%s|%s|", "-------------", "-----------------", "------------------", "------------------");
+
+				for (size_t i = 0; i < round_robin->length; i++)
+				{
+					printf("\n|%13s|%17s|%18s|%18s|",
+						   round_robin->buffer[i]->name->buffer,
+						   static_pri->buffer[i]->name->buffer,
+						   dynamic_pri->buffer[i]->name->buffer,
+						   type_pri->buffer[i]->name->buffer);
+				}
+
+				ENTER;
+
+				qua_delete(&round_robin);
+				qua_delete(&static_pri);
+				qua_delete(&dynamic_pri);
+				qua_delete(&type_pri);
+
+				qua_delete(&queue1);
+				qua_delete(&queue2);
+				qua_delete(&queue3);
+				qua_delete(&queue4);
+			}
+
+			if (choice != 5)
+			{
+				printf("\nResults\n");
+
+				qua_display(result);
+
+				ENTER;
+
+				st = qua_delete(&result);
+
+				if (st != DS_OK)
+					return st;
 			}
 
 			st = qua_delete(&queue);
